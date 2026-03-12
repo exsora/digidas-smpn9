@@ -3,7 +3,7 @@ import { useState, useEffect } from "react";
 import { supabase } from "@/utils/supabase";
 import { 
   GraduationCap, Search, Printer, Loader2, 
-  Eye, X, User, Download, FileText 
+  Eye, X, User, Download, Calendar 
 } from "lucide-react";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -14,15 +14,14 @@ export default function SiswaPage() {
   const [loadingDownload, setLoadingDownload] = useState(false);
   const [search, setSearch] = useState("");
   const [config, setConfig] = useState(null);
+  
+  // State baru untuk filter bulan download
+  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth());
 
-  // State Modal
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [selectedStudent, setSelectedStudent] = useState(null);
-  const [reportData, setReportData] = useState([]); 
-  const [loadingDetail, setLoadingDetail] = useState(false);
-  const [summary, setSummary] = useState({ H: 0, S: 0, I: 0, A: 0, B: 0 }); 
-
-  const TARGET_SESI = 100;
+  const daftarBulan = [
+    "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+    "Juli", "Agustus", "September", "Oktober", "November", "Desember"
+  ];
 
   useEffect(() => {
     fetchData();
@@ -40,13 +39,9 @@ export default function SiswaPage() {
         .order('full_name', { ascending: true });
       
       if (error) throw error;
-      const safeData = data?.map(s => ({
-        ...s,
-        kelas_name: s.kelas?.name || "Belum Masuk Kelas"
-      })) || [];
-      setSiswa(safeData);
+      setSiswa(data?.map(s => ({ ...s, kelas_name: s.kelas?.name || "Tanpa Kelas" })) || []);
     } catch (error) {
-      console.error("Error:", error.message);
+      console.error(error);
     } finally {
       setLoading(false);
     }
@@ -65,8 +60,8 @@ export default function SiswaPage() {
     } catch (e) { return null; }
   };
 
-  // --- FUNGSI DOWNLOAD REKAP KESELURUHAN KELAS (SATU TABEL) ---
-  const handleDownloadRekapKelas = async (namaKelas) => {
+  // --- FUNGSI DOWNLOAD REKAP PER BULAN ---
+  const handleDownloadBulanan = async (namaKelas) => {
     if (loadingDownload) return;
     setLoadingDownload(true);
     
@@ -74,74 +69,67 @@ export default function SiswaPage() {
       const safeConfig = config || {};
       const doc = new jsPDF('p', 'mm', 'a4');
       const pageWidth = doc.internal.pageSize.width;
-      const today = new Date();
+      const currentYear = new Date().getFullYear();
       
-      // 1. Data Siswa & Absen
       const siswaDiKelas = siswa.filter(s => s.kelas_name === namaKelas);
       const studentIds = siswaDiKelas.map(s => s.user_id);
+
+      // Ambil data absen dengan filter bulan
       const { data: allAbsen, error } = await supabase
         .from('absensi')
-        .select('student_user_id, status')
+        .select('student_user_id, status, tanggal')
         .in('student_user_id', studentIds);
 
       if (error) throw error;
 
-      // Header Gambar
-      const logoKiri = await getBase64Image(safeConfig.logo_kiri_url);
-      if (logoKiri) doc.addImage(logoKiri, "PNG", 12, 10, 20, 20);
+      // Filter data berdasarkan bulan yang dipilih di state
+      const dataTerfilter = allAbsen.filter(a => {
+        const d = new Date(a.tanggal);
+        return d.getMonth() === parseInt(selectedMonth) && d.getFullYear() === currentYear;
+      });
 
-      // Header Teks
+      // Header
+      const logoKiri = await getBase64Image(safeConfig.logo_kiri_url);
+      if (logoKiri) doc.addImage(logoKiri, "PNG", 12, 10, 18, 18);
+
       doc.setFont("times", "bold");
       doc.setFontSize(14);
       doc.text((safeConfig.nama_sekolah || "LAPORAN SEKOLAH").toUpperCase(), pageWidth / 2, 18, { align: "center" });
       doc.setFontSize(11);
-      doc.text("REKAPITULASI KEHADIRAN SISWA KESELURUHAN", pageWidth / 2, 24, { align: "center" });
+      doc.text(`REKAPITULASI KEHADIRAN BULAN ${daftarBulan[selectedMonth].toUpperCase()} ${currentYear}`, pageWidth / 2, 24, { align: "center" });
       doc.setFont("times", "normal");
-      doc.text(`Kelas: ${namaKelas} | Tanggal Cetak: ${today.toLocaleDateString('id-ID')}`, pageWidth / 2, 29, { align: "center" });
+      doc.text(`Kelas: ${namaKelas}`, pageWidth / 2, 29, { align: "center" });
       doc.line(10, 32, pageWidth - 10, 32);
 
-      // 2. Olah Data Siswa ke Tabel
+      // Isi Tabel
       const tableBody = siswaDiKelas.map((std, index) => {
-        const d = allAbsen.filter(a => a.student_user_id === std.user_id);
+        const d = dataTerfilter.filter(a => a.student_user_id === std.user_id);
         const h = d.filter(a => a.status === 'hadir').length;
         const s = d.filter(a => a.status === 'sakit').length;
         const i = d.filter(a => a.status === 'izin').length;
         const a = d.filter(x => ['alpa', 'alpha'].includes(x.status)).length;
         const b = d.filter(x => x.status === 'bolos').length;
-        const total = h + s + i + a + b;
-        const persen = total > 0 ? ((h / total) * 100).toFixed(0) : 0;
 
-        return [index + 1, std.full_name, std.nis || '-', h, s, i, a, b, `${persen}%`];
+        return [index + 1, std.full_name, std.nis || '-', h, s, i, a, b];
       });
 
-      // 3. Render Tabel
       autoTable(doc, {
         startY: 38,
-        head: [['No', 'Nama Siswa', 'NIS', 'H', 'S', 'I', 'A', 'B', '%']],
+        head: [['No', 'Nama Siswa', 'NIS', 'H', 'S', 'I', 'A', 'B']],
         body: tableBody,
         theme: 'grid',
         headStyles: { fillColor: [22, 163, 74], halign: 'center' },
-        styles: { font: "times", fontSize: 9 },
-        columnStyles: {
-          0: { halign: 'center', cellWidth: 10 },
-          2: { halign: 'center' },
-          3: { halign: 'center' },
-          4: { halign: 'center' },
-          5: { halign: 'center' },
-          6: { halign: 'center' },
-          7: { halign: 'center' },
-          8: { halign: 'center', fontStyle: 'bold' },
-        }
+        styles: { font: "times", fontSize: 9, halign: 'center' },
+        columnStyles: { 1: { halign: 'left' } }
       });
 
       // TTD
       let finalY = doc.lastAutoTable.finalY + 15;
-      if (finalY > 250) { doc.addPage(); finalY = 20; }
-      doc.text(`${safeConfig.kota_cetak || "Palu"}, ${today.toLocaleDateString('id-ID')}`, pageWidth - 70, finalY);
+      doc.text(`${safeConfig.kota_cetak || "Palu"}, ${new Date().toLocaleDateString('id-ID')}`, pageWidth - 70, finalY);
       doc.text("Wali Kelas,", pageWidth - 70, finalY + 7);
       doc.text("( ____________________ )", pageWidth - 70, finalY + 30);
 
-      doc.save(`REKAP_KESELURUHAN_${namaKelas.replace(/\s+/g, '_')}.pdf`);
+      doc.save(`REKAP_${namaKelas}_${daftarBulan[selectedMonth]}_${currentYear}.pdf`);
     } catch (err) {
       alert("Gagal: " + err.message);
     } finally {
@@ -149,65 +137,77 @@ export default function SiswaPage() {
     }
   };
 
-  const handleOpenDetail = async (student) => {
-    // ... (Logika detail sama seperti kode sebelumnya)
-    setSelectedStudent(student);
-    setIsModalOpen(true);
-    // (Tambahkan fetch detail di sini jika perlu)
-  };
-
-  const filteredSiswa = siswa.filter(s => 
-    s.full_name?.toLowerCase().includes(search.toLowerCase())
-  );
-
-  const daftarKelas = Array.from(new Set(siswa.map(s => s.kelas_name))).filter(k => k !== "Belum Masuk Kelas");
+  const daftarKelas = Array.from(new Set(siswa.map(s => s.kelas_name))).filter(k => k !== "Tanpa Kelas");
 
   return (
     <div className="p-8 bg-white min-h-screen rounded-3xl shadow-sm border border-gray-100">
+      {/* HEADER SECTION */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
             <GraduationCap className="text-green-600"/> Laporan Kehadiran
           </h1>
-          <p className="text-gray-500 text-sm">Download rekapitulasi per kelas atau lihat detail siswa.</p>
-        </div>
-        <div className="relative flex-1 md:w-64 w-full">
-          <Search className="absolute left-3 top-3 text-gray-400" size={18}/>
-          <input 
-            type="text" 
-            placeholder="Cari nama..." 
-            className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-green-500"
-            onChange={(e) => setSearch(e.target.value)}
-          />
+          <p className="text-gray-500 text-sm">Download rekap absen bulanan per kelas.</p>
         </div>
       </div>
 
-      {/* SEKSI DOWNLOAD PER KELAS */}
-      <div className="mb-8 p-6 bg-green-50 rounded-2xl border border-green-100">
-        <h3 className="text-sm font-bold text-green-700 mb-4 flex items-center gap-2">
-          <FileText size={18}/> Cetak Rekap Keseluruhan Siswa Per Kelas
-        </h3>
-        <div className="flex flex-wrap gap-3">
-          {daftarKelas.map((kls, i) => (
-            <button
-              key={i}
-              onClick={() => handleDownloadRekapKelas(kls)}
-              disabled={loadingDownload}
-              className="flex items-center gap-2 bg-white text-green-700 border border-green-200 px-5 py-2.5 rounded-xl hover:bg-green-600 hover:text-white transition-all text-sm font-bold shadow-sm disabled:opacity-50"
+      {/* FILTER & DOWNLOAD SECTION */}
+      <div className="mb-8 p-6 bg-blue-50 rounded-2xl border border-blue-100">
+        <div className="flex flex-col md:flex-row md:items-end gap-6">
+          {/* Pilih Bulan */}
+          <div className="w-full md:w-64">
+            <label className="text-xs font-bold text-blue-700 uppercase mb-2 flex items-center gap-2">
+              <Calendar size={14}/> 1. Pilih Bulan Rekap:
+            </label>
+            <select 
+              className="w-full p-2.5 rounded-xl border-blue-200 text-sm focus:ring-blue-500 font-medium"
+              value={selectedMonth}
+              onChange={(e) => setSelectedMonth(e.target.value)}
             >
-              {loadingDownload ? <Loader2 className="animate-spin" size={16}/> : <Download size={16}/>}
-              Download Kelas {kls}
-            </button>
-          ))}
+              {daftarBulan.map((bln, idx) => (
+                <option key={idx} value={idx}>{bln}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Download Buttons */}
+          <div className="flex-1">
+            <label className="text-xs font-bold text-blue-700 uppercase mb-2 block">
+              2. Pilih Kelas untuk Download PDF:
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {daftarKelas.map((kls, i) => (
+                <button
+                  key={i}
+                  onClick={() => handleDownloadBulanan(kls)}
+                  disabled={loadingDownload}
+                  className="flex items-center gap-2 bg-white text-blue-600 border border-blue-200 px-4 py-2 rounded-xl hover:bg-blue-600 hover:text-white transition-all text-xs font-bold shadow-sm"
+                >
+                  {loadingDownload ? <Loader2 className="animate-spin" size={14}/> : <Download size={14}/>}
+                  Kelas {kls}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* TABEL DAFTAR SISWA */}
+      {/* SEARCH & TABLE SISWA */}
+      <div className="mb-4 relative max-w-sm">
+        <Search className="absolute left-3 top-3 text-gray-400" size={18}/>
+        <input 
+          type="text" 
+          placeholder="Cari nama siswa..." 
+          className="w-full pl-10 pr-4 py-2 bg-gray-50 border border-gray-100 rounded-xl text-sm"
+          onChange={(e) => setSearch(e.target.value)}
+        />
+      </div>
+
       <div className="overflow-x-auto border rounded-xl">
         <table className="w-full text-sm text-left">
-          <thead className="bg-gray-50 text-gray-500 uppercase text-xs">
+          <thead className="bg-gray-50 text-gray-500 uppercase text-[10px] font-bold">
             <tr>
-              <th className="px-6 py-4">Nama</th>
+              <th className="px-6 py-4">Nama Lengkap</th>
               <th className="px-6 py-4 text-center">Kelas</th>
               <th className="px-6 py-4 text-center">Aksi</th>
             </tr>
@@ -215,20 +215,20 @@ export default function SiswaPage() {
           <tbody className="divide-y">
             {loading ? (
               <tr><td colSpan="3" className="text-center p-10"><Loader2 className="animate-spin mx-auto text-green-600"/></td></tr>
-            ) : filteredSiswa.map((s, i) => (
-              <tr key={i} className="hover:bg-gray-50">
-                <td className="px-6 py-4 font-bold text-gray-800">{s.full_name}</td>
-                <td className="px-6 py-4 text-center font-bold text-blue-600">{s.kelas_name}</td>
+            ) : siswa.filter(s => s.full_name.toLowerCase().includes(search.toLowerCase())).map((s, i) => (
+              <tr key={i} className="hover:bg-gray-50 transition-colors">
+                <td className="px-6 py-4 font-medium text-gray-800">{s.full_name}</td>
+                <td className="px-6 py-4 text-center"><span className="bg-blue-50 text-blue-600 px-3 py-1 rounded-full text-xs font-bold">{s.kelas_name}</span></td>
                 <td className="px-6 py-4 text-center">
-                  <button onClick={() => handleOpenDetail(s)} className="text-blue-600 font-bold hover:underline">Detail</button>
+                  <button className="text-green-600 hover:text-green-700 font-bold text-xs flex items-center gap-1 justify-center w-full">
+                    <Eye size={14}/> Detail
+                  </button>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      
-      {/* Modal Detail tetap bisa Anda gunakan di sini (kode modal Anda sebelumnya) */}
     </div>
   );
 }
